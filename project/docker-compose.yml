@@ -1,0 +1,59 @@
+version: "3.9"
+
+services:
+  # ── FastAPI Backend ──
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: deptai-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - deptai-data:/app/data
+    environment:
+      - DATABASE_URL=sqlite:////app/data/deptai.db
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - FAISS_INDEX_PATH=/app/data/faiss_index
+      - DOCUMENTS_PATH=/app/data/documents
+      - SECRET_KEY=${SECRET_KEY:-change-this-in-production}
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+  # ── React Frontend ──
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: deptai-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000/api
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # ── Ollama Local LLM ──
+  ollama:
+    image: ollama/ollama:latest
+    container_name: deptai-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    # GPU support (uncomment if you have NVIDIA GPU):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  deptai-data:
+  ollama-models:

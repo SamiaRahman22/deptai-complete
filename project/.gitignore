@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Database
+*.db
+*.sqlite3
+
+# Data (don't commit indexes or uploaded docs)
+backend/data/
+
+# Environment
+.env
+!.env.example
+
+# Node / React
+node_modules/
+frontend/build/
+frontend/.env
+!frontend/.env.example
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Docker
+*.override.yml
+
+# Logs
+*.log

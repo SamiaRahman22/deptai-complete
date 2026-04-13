@@ -1,0 +1,276 @@
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { useAuth } from '../../context/AuthContext';
+import { useNavigate } from 'react-router-dom';
+import { chatAPI } from '../../utils/api';
+import {
+  Bot, Send, LogOut, User, BookOpen, FileText, HelpCircle,
+  Paperclip, RotateCcw, ThumbsUp, ThumbsDown, Copy,
+  Sparkles, ChevronDown, AlertTriangle, Wifi, WifiOff
+} from 'lucide-react';
+import toast from 'react-hot-toast';
+
+const SAMPLE_QUESTIONS = [
+  'What are the thesis submission deadlines?',
+  'How do I apply for a course waiver?',
+  'What is the attendance policy?',
+  'Who is the department head?',
+  'How to request official transcripts?',
+  'What is the minimum CGPA to graduate?',
+];
+
+const renderMarkdown = (text) => {
+  return text
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/^#{1,3}\s+(.+)/gm, '<strong class="text-white">$1</strong>')
+    .replace(/^[•\-]\s+(.+)/gm, '• $1')
+    .replace(/^\d+\.\s+(.+)/gm, (m, p) => m);
+};
+
+const Message = ({ msg }) => {
+  const isUser = msg.role === 'user';
+  const isOOD = msg.content?.includes('Out-of-Domain') || msg.content?.includes('⚠️');
+  const [copied, setCopied] = useState(false);
+
+  const copy = () => {
+    navigator.clipboard.writeText(msg.content);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  if (isUser) return (
+    <div className="flex justify-end mb-4 animate-fade-in">
+      <div className="flex items-end gap-2 max-w-[75%]">
+        <div className="chat-bubble-user">{msg.content}</div>
+        <div className="w-7 h-7 rounded-full bg-primary-700 flex items-center justify-center flex-shrink-0">
+          <User size={13} className="text-white" />
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="flex justify-start mb-4 animate-fade-in group">
+      <div className="flex items-end gap-2 max-w-[82%]">
+        <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0
+          ${isOOD ? 'bg-amber-600/30 border border-amber-500/30' : 'bg-primary-600/30 border border-primary-500/30'}`}>
+          {isOOD ? <AlertTriangle size={13} className="text-amber-400" /> : <Bot size={13} className="text-primary-400" />}
+        </div>
+        <div className="flex-1">
+          <div className={`px-4 py-3 rounded-2xl rounded-bl-sm text-sm leading-relaxed font-body
+            ${isOOD ? 'bg-amber-900/20 border border-amber-500/20 text-amber-200' : 'bg-surface-3 border border-white/8 text-gray-200'}`}
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content).replace(/\n/g, '<br/>') }} />
+          
+          {msg.sources?.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mt-2">
+              {msg.sources.map((s, i) => (
+                <span key={i} className="badge bg-primary-600/10 text-primary-400 border border-primary-500/20 text-xs">
+                  <FileText size={9} />{s}
+                </span>
+              ))}
+            </div>
+          )}
+          {msg.retrieval_method && (
+            <div className="flex items-center gap-2 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+              <span className="text-gray-700 text-xs font-mono">{msg.retrieval_method}</span>
+              {msg.response_time_ms && <span className="text-gray-700 text-xs font-mono">{msg.response_time_ms}ms</span>}
+              <button onClick={copy} className="p-1 rounded hover:bg-white/5 text-gray-600 hover:text-gray-400 transition-colors">
+                <Copy size={10} />
+              </button>
+              <button className="p-1 rounded hover:bg-white/5 text-gray-600 hover:text-emerald-400 transition-colors"><ThumbsUp size={10} /></button>
+              <button className="p-1 rounded hover:bg-white/5 text-gray-600 hover:text-rose-400 transition-colors"><ThumbsDown size={10} /></button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const TypingIndicator = () => (
+  <div className="flex justify-start mb-4">
+    <div className="flex items-end gap-2">
+      <div className="w-7 h-7 rounded-full bg-primary-600/30 border border-primary-500/30 flex items-center justify-center">
+        <Bot size={13} className="text-primary-400" />
+      </div>
+      <div className="bg-surface-3 border border-white/8 px-4 py-3 rounded-2xl rounded-bl-sm flex items-center gap-1.5">
+        <div className="typing-dot" /><div className="typing-dot" /><div className="typing-dot" />
+      </div>
+    </div>
+  </div>
+);
+
+export default function ChatPage() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  const [messages, setMessages] = useState([{
+    id: 1, role: 'assistant',
+    content: `Hello **${user?.name?.split(' ')[0] || 'there'}**! 👋 I'm your department AI assistant.\n\nI can help you with:\n• **Course & curriculum** questions\n• **Procedures & forms** guidance\n• **Deadlines & schedules**\n• **Faculty & contact** information\n\nWhat would you like to know?`,
+    sources: [],
+  }]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [showSidebar, setShowSidebar] = useState(true);
+  const [sessionId] = useState(() => crypto.randomUUID());
+  const [apiOnline, setApiOnline] = useState(true);
+  const bottomRef = useRef(null);
+  const inputRef = useRef(null);
+
+  // Build conversation history for context
+  const conversationHistory = messages
+    .filter(m => m.role !== 'system')
+    .slice(-10)
+    .map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }));
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, loading]);
+
+  const sendMessage = useCallback(async (text) => {
+    const msg = (text || input).trim();
+    if (!msg || loading) return;
+    setInput('');
+
+    const userMsg = { id: Date.now(), role: 'user', content: msg };
+    setMessages(prev => [...prev, userMsg]);
+    setLoading(true);
+
+    try {
+      const result = await chatAPI.sendMessage(msg, sessionId, conversationHistory);
+      setApiOnline(true);
+      setMessages(prev => [...prev, {
+        id: Date.now() + 1,
+        role: 'assistant',
+        content: result.response,
+        sources: result.sources || [],
+        retrieval_method: result.retrieval_method,
+        response_time_ms: result.response_time_ms,
+        is_in_domain: result.is_in_domain,
+      }]);
+    } catch (err) {
+      setApiOnline(false);
+      const errMsg = err.response?.data?.detail || 'Failed to reach the backend. Is FastAPI running?';
+      toast.error(errMsg);
+      setMessages(prev => [...prev, {
+        id: Date.now() + 1,
+        role: 'assistant',
+        content: `**Connection Error**\n\nCould not reach the backend API.\n\nMake sure:\n1. FastAPI is running: \`uvicorn main:app --reload\`\n2. It's accessible at \`http://localhost:8000\`\n3. You're logged in with a valid token`,
+        sources: [],
+      }]);
+    } finally {
+      setLoading(false);
+    }
+  }, [input, loading, sessionId, conversationHistory]);
+
+  const handleKey = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  };
+
+  const handleLogout = async () => {
+    await logout();
+    navigate('/');
+    toast.success('Logged out');
+  };
+
+  const clearChat = () => {
+    setMessages([{ id: Date.now(), role: 'assistant', content: 'Chat cleared. How can I help?', sources: [] }]);
+  };
+
+  return (
+    <div className="h-screen bg-surface-0 flex overflow-hidden">
+      {/* Sidebar */}
+      <aside className={`${showSidebar ? 'w-64' : 'w-0'} transition-all duration-300 bg-surface-1 border-r border-white/8 flex flex-col overflow-hidden flex-shrink-0`}>
+        <div className="p-4 border-b border-white/8">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 bg-primary-600 rounded-lg flex items-center justify-center"><Bot size={16} className="text-white" /></div>
+            <div>
+              <p className="font-display font-bold text-white text-sm">DeptAI</p>
+              <p className="text-gray-600 text-xs font-mono">RAG + Ollama</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex-1 p-3 overflow-y-auto">
+          <button onClick={clearChat}
+            className="w-full mb-4 py-2 px-3 rounded-lg bg-primary-600/20 border border-primary-500/30 hover:bg-primary-600/30 text-primary-400 text-xs font-display font-medium transition-colors flex items-center gap-2">
+            <Sparkles size={12} /> New Chat
+          </button>
+          <p className="text-gray-600 text-xs font-display font-semibold uppercase tracking-wider px-2 mb-2">Quick Questions</p>
+          <div className="space-y-0.5">
+            {SAMPLE_QUESTIONS.map((q, i) => (
+              <button key={i} onClick={() => sendMessage(q)}
+                className="w-full text-left px-3 py-2 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-white/5 text-xs font-body transition-colors leading-snug">
+                {q}
+              </button>
+            ))}
+          </div>
+          <div className="mt-4 pt-4 border-t border-white/8">
+            <p className="text-gray-600 text-xs font-display font-semibold uppercase tracking-wider px-2 mb-1">Resources</p>
+            {[{ icon: HelpCircle, label: 'FAQs' }, { icon: BookOpen, label: 'Procedures' }, { icon: FileText, label: 'Documents' }].map(({ icon: Icon, label }) => (
+              <button key={label} className="sidebar-link w-full text-left"><Icon size={14} /> {label}</button>
+            ))}
+          </div>
+        </div>
+
+        <div className="p-3 border-t border-white/8">
+          <div className="flex items-center gap-2.5 px-2 py-2">
+            <div className="w-7 h-7 rounded-full bg-primary-700 flex items-center justify-center flex-shrink-0">
+              <span className="text-white text-xs font-display font-bold">{user?.name?.[0]?.toUpperCase()}</span>
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-white text-xs font-display font-medium truncate">{user?.name}</p>
+              <p className="text-gray-600 text-xs font-mono truncate">{user?.student_id}</p>
+            </div>
+            <button onClick={handleLogout} className="text-gray-600 hover:text-rose-400 transition-colors p-1">
+              <LogOut size={13} />
+            </button>
+          </div>
+        </div>
+      </aside>
+
+      {/* Main chat */}
+      <div className="flex-1 flex flex-col min-w-0">
+        <div className="h-14 border-b border-white/8 bg-surface-1/50 flex items-center justify-between px-4 flex-shrink-0">
+          <div className="flex items-center gap-3">
+            <button onClick={() => setShowSidebar(!showSidebar)} className="p-1.5 rounded hover:bg-white/8 text-gray-500 hover:text-gray-300 transition-colors">
+              <ChevronDown size={16} className={`transition-transform ${showSidebar ? 'rotate-90' : '-rotate-90'}`} />
+            </button>
+            <div className="flex items-center gap-2">
+              {apiOnline
+                ? <><div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /><span className="text-gray-400 text-sm font-body">Department Assistant</span></>
+                : <><WifiOff size={12} className="text-rose-400" /><span className="text-rose-400 text-sm font-body">Backend Offline</span></>
+              }
+            </div>
+            <span className="badge bg-primary-600/10 text-primary-400 border border-primary-500/20 text-xs">RAG + Ollama</span>
+          </div>
+          <button onClick={clearChat} className="p-1.5 rounded hover:bg-white/8 text-gray-600 hover:text-gray-300 transition-colors"><RotateCcw size={14} /></button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 md:p-6">
+          <div className="max-w-2xl mx-auto">
+            {messages.map(msg => <Message key={msg.id} msg={msg} />)}
+            {loading && <TypingIndicator />}
+            <div ref={bottomRef} />
+          </div>
+        </div>
+
+        <div className="border-t border-white/8 bg-surface-1/50 p-4">
+          <div className="max-w-2xl mx-auto">
+            <div className="flex items-end gap-3 bg-surface-2 border border-white/10 rounded-xl px-4 py-3 focus-within:border-primary-500/50 transition-colors">
+              <Paperclip size={17} className="text-gray-600 pb-0.5" />
+              <textarea ref={inputRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKey}
+                placeholder="Ask about courses, procedures, deadlines..." rows={1}
+                className="flex-1 bg-transparent text-gray-100 placeholder-gray-600 text-sm font-body outline-none resize-none leading-relaxed max-h-32 overflow-y-auto" />
+              <button onClick={() => sendMessage()} disabled={!input.trim() || loading}
+                className="p-2 rounded-lg bg-primary-600 hover:bg-primary-500 disabled:bg-surface-3 disabled:text-gray-600 text-white transition-all duration-200 flex-shrink-0 disabled:cursor-not-allowed">
+                <Send size={15} />
+              </button>
+            </div>
+            <p className="text-center text-gray-700 text-xs font-body mt-2">
+              Answers grounded in department documents via RAG · Powered by Ollama (local LLM)
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
