@@ -19,6 +19,8 @@ from app.rag.pipeline import rag_pipeline
 from app.services.domain_checker import domain_checker
 from app.services.structured_retrieval import structured_retrieval
 from app.services.ollama_client import ollama_client
+from app.services.response_validator import response_validator
+from app.services.cache_service import cache_service
 
 router = APIRouter()
 
@@ -36,6 +38,7 @@ class ChatResponse(BaseModel):
     retrieval_method: str = "none"
     response_time_ms: int
     session_id: str
+    confidence_score: float = 0.5  # NEW
 
 
 @router.post("/message", response_model=ChatResponse)
@@ -60,9 +63,32 @@ async def chat_message(
     session_id = request.session_id or str(uuid.uuid4())
     query = request.message.strip()
 
-    # ── STEP 1: DOMAIN CHECK ──
+    # ── STEP 0.5: CHECK CACHE (NEW) ──
+    cached_response = cache_service.get(query)
+    if cached_response:
+        response_ms = int((time.time() - start_time) * 1000)
+        background_tasks.add_task(
+            _log_query, db, current_user.id, query, cached_response["response"],
+            True, cached_response.get("confidence_score", 0.8), "resolved_cached",
+            cached_response.get("sources", []), session_id, response_ms
+        )
+        return ChatResponse(
+            response=cached_response["response"],
+            is_in_domain=cached_response.get("is_in_domain", True),
+            sources=cached_response.get("sources", []),
+            retrieval_method=cached_response.get("retrieval_method", "cache"),
+            response_time_ms=response_ms,
+            session_id=session_id,
+            confidence_score=cached_response.get("confidence_score", 0.8),
+        )
+
+    # ── STEP 1: DOMAIN CHECK (Multi-layer with confidence) ──
     domain_result = await domain_checker.check(query)
-    if not domain_result.is_in_domain:
+    domain_confidence = domain_result.confidence_score
+    
+    # Route based on confidence score
+    if domain_result.confidence_score == 0.0:
+        # HARD REJECT: Clearly out of domain
         response_ms = int((time.time() - start_time) * 1000)
         rejection_msg = (
             "⚠️ **Out-of-Domain Query Detected**\n\n"
@@ -73,7 +99,7 @@ async def chat_message(
         )
         background_tasks.add_task(
             _log_query, db, current_user.id, query, rejection_msg,
-            False, domain_result.score, "rejected", [], session_id, response_ms
+            False, domain_result.confidence_score, "rejected", [], session_id, response_ms
         )
         return ChatResponse(
             response=rejection_msg,
@@ -82,7 +108,11 @@ async def chat_message(
             retrieval_method="domain_filter",
             response_time_ms=response_ms,
             session_id=session_id,
+            confidence_score=0.0,
         )
+    
+    # For medium/low confidence, we'll still try to answer but with caveats
+    # This will be handled later when generating response
 
     # ── STEP 2: STRUCTURED RETRIEVAL (FAQs + Procedures) ──
     structured_context = await structured_retrieval.retrieve(query, db)
@@ -125,6 +155,22 @@ async def chat_message(
             conversation_history=request.conversation_history or [],
             department=current_user.department,
         )
+        
+        # ── STEP 6.5: RESPONSE VALIDATION (NEW) ──
+        from app.services.response_validator import response_validator
+        validation_result = response_validator.validate_response(
+            response=response_text,
+            source_chunks=rag_context + [structured_context] if structured_context else rag_context,
+            query=query
+        )
+        response_confidence = validation_result["confidence_score"]
+        
+        # If confidence low, add disclaimer
+        if response_confidence < 0.5:
+            response_text += "\n\n⚠️ **Note:** This answer has limited source backing. For critical information, please verify with the department office."
+        
+        logger.info(f"Response validation: confidence={response_confidence:.2f}, unverified={len(validation_result['unverified_claims'])}")
+        
     except Exception as e:
         logger.error(f"Ollama generation failed: {e}")
         if full_context:
@@ -137,6 +183,7 @@ async def chat_message(
                 "I couldn't find specific information about that in the department knowledge base. "
                 "Please contact the department office directly for assistance."
             )
+        response_confidence = 0.3
 
     response_ms = int((time.time() - start_time) * 1000)
 
@@ -146,6 +193,15 @@ async def chat_message(
         _log_query, db, current_user.id, query, response_text,
         True, domain_result.score, status, all_sources, session_id, response_ms
     )
+    # ── STEP 7.5: CACHE RESPONSE (NEW) ──
+    cache_response = {
+        "response": response_text,
+        "is_in_domain": True,
+        "sources": all_sources,
+        "retrieval_method": retrieval_method,
+        "confidence_score": response_confidence,
+    }
+    background_tasks.add_task(cache_service.set, query, cache_response)
 
     return ChatResponse(
         response=response_text,
@@ -154,6 +210,7 @@ async def chat_message(
         retrieval_method=retrieval_method,
         response_time_ms=response_ms,
         session_id=session_id,
+        confidence_score=max(response_confidence * domain_confidence, 0.1),  # NEW
     )
 
 

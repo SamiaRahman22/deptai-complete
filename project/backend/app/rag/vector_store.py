@@ -11,7 +11,7 @@ from typing import List, Tuple, Optional
 from dataclasses import dataclass, asdict
 from loguru import logger
 from app.core.config import settings
-
+from app.rag.bm25_search import bm25_searcher  #NEW
 
 @dataclass
 class IndexedChunk:
@@ -88,6 +88,83 @@ class FAISSVectorStore:
                 results.append((self._chunks[idx], float(score)))
 
         return results
+
+    def rebuild_bm25_index(self):                                #NEW
+        """Rebuild BM25 index from stored chunks."""
+        chunks_data = [
+            {
+                "text": chunk.text,
+                "source": chunk.source,
+                "index": chunk.chunk_index,
+            }
+            for chunk in self._chunks
+        ]
+        bm25_searcher.build_index(chunks_data)
+        logger.info(f"BM25 index rebuilt from {len(chunks_data)} chunks")
+
+    def hybrid_search(
+        self,
+        query_embedding: np.ndarray,
+        query_text: str,
+        top_k: int = 5,
+        alpha: float = 0.6
+    ) -> List[Tuple[IndexedChunk, float]]:
+        """
+        Hybrid search combining FAISS (semantic) + BM25 (keyword).
+        
+        Args:
+            query_embedding: Query vector from embedder
+            query_text: Original query text
+            top_k: Number of results to return
+            alpha: Weight for semantic vs keyword (0.6 = 60% semantic, 40% keyword)
+        
+        Returns:
+            List of (chunk, hybrid_score) tuples, sorted by hybrid_score
+        """
+        if self._index is None or self._index.ntotal == 0:
+            return []
+        
+        # Get semantic results (top 20 for blending)
+        semantic_results = self.search(query_embedding, top_k=20)
+        semantic_scores = {chunk.text: score for chunk, score in semantic_results}
+        
+        # Get keyword results (top 20 for blending)
+        keyword_results = bm25_searcher.search(query_text, top_k=20)
+        
+        # Normalize BM25 scores to [0, 1] range
+        if keyword_results:
+            max_bm25_score = max(score for _, score, _ in keyword_results)
+            keyword_scores = {
+                text: (score / max_bm25_score) if max_bm25_score > 0 else 0
+                for text, score, _ in keyword_results
+            }
+        else:
+            keyword_scores = {}
+        
+        # Blend scores for all results
+        all_texts = set(semantic_scores.keys()) | set(keyword_scores.keys())
+        blended_results = []
+        
+        for text in all_texts:
+            semantic_score = semantic_scores.get(text, 0)
+            keyword_score = keyword_scores.get(text, 0)
+            
+            # Weighted blend
+            blended_score = (alpha * semantic_score) + ((1 - alpha) * keyword_score)
+            
+            # Find the chunk object
+            chunk = None
+            for c in self._chunks:
+                if c.text == text:
+                    chunk = c
+                    break
+            
+            if chunk:
+                blended_results.append((chunk, blended_score))
+        
+        # Sort by blended score and return top-k
+        blended_results.sort(key=lambda x: x[1], reverse=True)
+        return blended_results[:top_k]
 
     def save(self):
         """Persist index and metadata to disk."""

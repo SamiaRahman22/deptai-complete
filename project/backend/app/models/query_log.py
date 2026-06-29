@@ -32,3 +32,6 @@ class QueryLog(Base):
 
     # Relationships
     user = relationship("User", back_populates="query_logs")
+
+    # Response confidence
+    confidence_score: float = Column(Float, default=0.5)  # NEW

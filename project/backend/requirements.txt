@@ -8,6 +8,7 @@ alembic==1.12.1
 pydantic==2.5.0
 pydantic-settings==2.1.0
 python-dotenv==1.0.0
+redis==5.0.0    
 
 # RAG Pipeline
 sentence-transformers==2.2.2
@@ -19,6 +20,7 @@ requests==2.31.0
 numpy>=1.25.0,<2.0
 torch==2.1.0
 transformers==4.35.2
+rank-bm25==0.2.1
 
 # Ollama
 ollama==0.1.7

@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.models.document import Document
 from app.models.user import User
 from app.rag.pipeline import rag_pipeline
+from app.services.document_versioning import document_versioning
 
 router = APIRouter()
 
@@ -39,6 +40,12 @@ def doc_to_dict(d: Document) -> dict:
         "error_message": d.error_message,
         "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
         "indexed_at": d.indexed_at.isoformat() if d.indexed_at else None,
+        # NEW  - Versioning fields
+        "doc_id": getattr(d, 'doc_id', None),
+        "version": getattr(d, 'version', None),
+        "is_active": getattr(d, 'is_active', True),
+        "category": getattr(d, 'category', None),
+        "notes": getattr(d, 'notes', None),
     }
 
 
@@ -47,7 +54,10 @@ async def list_documents(
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
-    docs = db.query(Document).order_by(Document.uploaded_at.desc()).all()
+    # Show only active documents by default
+    docs = db.query(Document).filter(
+        Document.is_active == True
+    ).order_by(Document.uploaded_at.desc()).all()
     return [doc_to_dict(d) for d in docs]
 
 
@@ -80,7 +90,23 @@ async def upload_document(
     with open(file_path, "wb") as f:
         f.write(content)
 
-    # Create DB record
+    # NEW: Create versioned document
+    # Extract document name from filename (without extension)
+    doc_name = file.filename.rsplit('.', 1)[0] if '.' in file.filename else file.filename
+    doc_id = doc_name.upper().replace(" ", "-")  # e.g., "CSE-Handbook"
+    
+    # Create new version using versioning service
+    version = document_versioning.create_version(
+        db=db,
+        doc_id=doc_id,
+        filename=unique_name,
+        file_type=ext,
+        category="general",  # Default category
+        uploaded_by=admin.email,  # Assumes admin has email field
+        notes=f"Uploaded: {file.filename}",
+    )
+    
+    # Create DB record with versioning
     doc = Document(
         filename=unique_name,
         original_filename=file.filename,
@@ -89,6 +115,10 @@ async def upload_document(
         file_path=file_path,
         status="uploaded",
         uploaded_by=admin.id,
+        doc_id=doc_id,  # NEW
+        version=version,  # NEW
+        is_active=True,  # NEW
+        category="general",  # NEW
     )
     db.add(doc)
     db.commit()
@@ -155,6 +185,45 @@ async def index_stats(
         "total_chunks": sum(d.chunk_count or 0 for d in indexed),
         "rag_ready": rag_pipeline.is_ready,
     }
+
+
+# ── NEW: VERSIONING ENDPOINTS ──
+@router.get("/{doc_id}/versions", response_model=List[dict])
+async def get_document_versions(
+    doc_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Get all versions of a document."""
+    versions = document_versioning.get_versions(db, doc_id)
+    return [doc_to_dict(v) for v in versions]
+
+
+@router.post("/{doc_id}/{version}/activate", status_code=200)
+async def activate_version(
+    doc_id: str,
+    version: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Activate a specific version of a document."""
+    success = document_versioning.activate_version(db, doc_id, version)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Version {version} not found")
+    
+    logger.info(f"Activated {doc_id} v{version}")
+    return {"message": f"Activated {doc_id} v{version}"}
+
+
+@router.get("/active", response_model=List[dict])
+async def get_active_documents(
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Get all active document versions."""
+    docs = document_versioning.get_active_documents(db)
+    return [doc_to_dict(d) for d in docs]
+
 
 
 # ── BACKGROUND INDEXING ──

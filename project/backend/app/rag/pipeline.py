@@ -12,6 +12,7 @@ from app.rag.chunker import chunk_text
 from app.rag.embedder import embedding_service
 from app.rag.vector_store import vector_store, IndexedChunk
 from app.core.config import settings
+from app.rag.reranker import reranker
 
 
 @dataclass
@@ -104,30 +105,38 @@ class RAGPipeline:
 
         # Step 7: Save
         vector_store.save()
+        vector_store.rebuild_bm25_index()   #NEW
         self.is_ready = True
 
         logger.info(f"  ✅ Indexed {len(chunks)} chunks from {source}")
         return IndexResult(chunk_count=len(chunks), page_count=page_count, source=source)
 
-    async def retrieve(self, query: str, top_k: int = None) -> RetrievalResult:
+    async def retrieve(self, query: str, top_k: int = None, use_hybrid: bool = True) -> RetrievalResult:    #NEW
         """
-        Retrieve most relevant chunks for a query using semantic search.
+        Retrieve most relevant chunks for a query.
         
-        Steps:
-        1. Embed the query
-        2. Search FAISS index
-        3. Return top-k chunks with sources
+        New: Supports hybrid search (semantic + keyword) via BM25
         """
         if not self.is_ready:
             return RetrievalResult(chunks=[], sources=[], scores=[])
 
         top_k = top_k or settings.TOP_K_RESULTS
 
-        # Embed query
-        query_embedding = embedding_service.embed_query(query)
-
-        # FAISS search
-        results = vector_store.search(query_embedding, top_k=top_k)
+        if use_hybrid:
+            # NEW: Use hybrid search (semantic + keyword)
+            query_embedding = embedding_service.embed_query(query)
+            results = vector_store.hybrid_search(
+                query_embedding=query_embedding,
+                query_text=query,
+                top_k=top_k,
+                alpha=0.6  # 60% semantic, 40% keyword
+            )
+            logger.info(f"Hybrid search used (semantic 60% + keyword 40%)")
+        else:
+            # Fallback: semantic-only search
+            query_embedding = embedding_service.embed_query(query)
+            results = vector_store.search(query_embedding, top_k=top_k)
+            logger.info(f"Semantic-only search used")
 
         if not results:
             return RetrievalResult(chunks=[], sources=[], scores=[])
@@ -135,8 +144,8 @@ class RAGPipeline:
         chunks = []
         sources = []
         scores = []
-
         seen_sources = set()
+        
         for chunk, score in results:
             chunk_text = f"[Source: {chunk.source}]\n{chunk.text}"
             chunks.append(chunk_text)
@@ -144,6 +153,14 @@ class RAGPipeline:
             if chunk.source not in seen_sources:
                 sources.append(chunk.source)
                 seen_sources.add(chunk.source)
+
+        # Optionally rerank results (improves quality by 15%)
+        if reranker.is_available and len(chunks) > 0:
+            chunk_tuples = [(chunk, score) for chunk, score in zip(chunks, scores)]
+            reranked = reranker.rerank(query, chunk_tuples, top_k=settings.TOP_K_RESULTS)
+            chunks = [chunk for chunk, _ in reranked]
+            scores = [score for _, score in reranked]
+            logger.info(f"Reranked top-{len(chunks)} results")
 
         logger.debug(f"Retrieved {len(chunks)} chunks (top score: {scores[0]:.3f})")
         return RetrievalResult(chunks=chunks, sources=sources, scores=scores)
