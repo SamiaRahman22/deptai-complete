@@ -11,17 +11,29 @@ User Query
     ↓
 Authentication (JWT)
     ↓
-Domain Check (keyword heuristics)
+Query Preprocessing
+    ↓
+Cache Check ← SKIP if cached (500ms vs 2500ms)
+    ↓
+Domain Check (keyword heuristics -> Multi-Layer)
     ↓ (in-domain only)
 Structured Retrieval (FAQ + Procedures DB)  ←── SQLite
     +
-RAG Retrieval (FAISS semantic search)       ←── SentenceTransformers
+RAG Retrieval [Semantic Search - FAISS] + [Keyword Search - BM25] → BLEND   ←── SentenceTransformers
     ↓
-Hybrid Context Assembly
+Reranking - Cross-Encoder ←  Improves accuracy 15%
     ↓
-Ollama LLM (llama3.2 local)
+Confidence Scoring ← Smart routing
     ↓
-Response + Sources → Frontend
+Context Assembly + Validation ←  Catch hallucinations
+    ↓
+Ollama LLM Generation(llama3.2 local)
+    ↓
+Response Validation ← Fact-checking
+    ↓
+Cache Storage + Logging ← Visibility
+    ↓
+Response + Confidence + Sources → Frontend
 ```
 
 ---
@@ -55,8 +67,10 @@ deptai/
 │   │   │   └── query_log.py
 │   │   ├── rag/
 │   │   │   ├── pipeline.py     # Orchestrator (index + retrieve)
+|   |   |   ├── bm25_search.py  # Keyword Search
 │   │   │   ├── extractor.py    # PDF/DOCX/TXT text extraction
 │   │   │   ├── chunker.py      # Sentence-aware text chunking
+|   |   |   ├── reranker.py     # Cross-Encoder
 │   │   │   ├── embedder.py     # SentenceTransformers wrapper
 │   │   │   └── vector_store.py # FAISS index management
 │   │   └── services/
